@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LC / SN QC Rating</title>
+<!--
+  Static (no-server) version of ../qc_standalone_webapp, for hosting on
+  GitHub Pages. Everything happens in the browser:
+
+  - Images: the rater picks their MT_QC_scans folder with a folder <input>.
+    The PNGs are read locally and shown via object URLs; nothing is uploaded.
+    Subfolders are recognized by name (MT_direct_transform_QC_images_LC/_SN),
+    and the subjid is the first "_"-delimited token of each filename, exactly
+    as in the Flask apps.
+  - Ratings: kept in localStorage under the rater's name, so a refresh or a
+    closed tab loses nothing. They leave the browser as the same two CSVs the
+    Flask apps write (identical columns, so they merge into the repo's
+    *_qc_notes_clean_subjid.csv files), via the two download buttons.
+  - Resuming elsewhere: "Load previous ratings" reads those CSVs back in.
+-->
+<style>
+  :root {
+    --good: #2e7d32;
+    --maybe: #b8860b;
+    --poor: #c62828;
+    --unrated: #9e9e9e;
+    --check: #1565c0;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0;
+    background: #fafafa;
+    color: #222;
+  }
+  .hidden { display: none !important; }
+
+  /* ---- setup screen ---- */
+  .card {
+    max-width: 640px;
+    margin: 60px auto;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 24px 28px;
+  }
+  .card h1 { font-size: 20px; margin: 0 0 16px 0; }
+  .card label.field { display: block; font-size: 14px; font-weight: 600; margin-top: 18px; }
+  .hint { font-size: 12px; color: #666; margin-top: 4px; }
+  .hint code { background: #f2f2f2; padding: 1px 4px; border-radius: 3px; }
+  .card input[type=text] {
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 14px;
+    padding: 8px;
+    margin-top: 6px;
+  }
+  .card input[type=file] { margin-top: 6px; font-size: 13px; }
+  .status-line { font-size: 13px; margin-top: 6px; }
+  .ok { color: var(--good); }
+  .error { color: var(--poor); }
+  .warning { color: var(--maybe); }
+  #start-btn { margin-top: 22px; font-size: 15px; padding: 8px 18px; cursor: pointer; }
+
+  /* ---- rating screen (same as the Flask apps' index.html) ---- */
+  header {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 10px 16px;
+    background: #fff;
+    border-bottom: 1px solid #ddd;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header h1 {
+    font-size: 16px;
+    margin: 0;
+    margin-right: auto;
+  }
+  header button, header select, header input {
+    font-size: 14px;
+    padding: 6px 10px;
+  }
+  .filter {
+    font-size: 13px;
+    color: #555;
+    white-space: nowrap;
+  }
+  .filter select {
+    font-size: 13px;
+    padding: 4px 6px;
+  }
+  #progress, #rater-info {
+    font-size: 13px;
+    color: #555;
+    white-space: nowrap;
+  }
+  #save-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 16px;
+    font-size: 13px;
+    background: #f5f5f5;
+    border-bottom: 1px solid #ddd;
+  }
+  #save-bar button { font-size: 13px; padding: 4px 10px; }
+  #unsaved.pending { color: var(--poor); font-weight: 600; }
+  main {
+    display: flex;
+    gap: 16px;
+    padding: 16px;
+  }
+  .panel {
+    flex: 1;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 12px;
+    min-width: 0;
+  }
+  .panel h2 {
+    font-size: 15px;
+    margin: 0 0 8px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    color: #fff;
+    background: var(--unrated);
+  }
+  .badge.yes { background: var(--good); }
+  .badge.maybe { background: var(--maybe); }
+  .badge.no { background: var(--poor); }
+  .badge.check { background: var(--check); }
+  .badge.hidden { display: none; }
+  .img-wrap {
+    background: #111;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 300px;
+    overflow: hidden;
+  }
+  .img-wrap img {
+    max-width: 100%;
+    max-height: 70vh;
+    display: block;
+  }
+  .img-missing {
+    color: #999;
+    font-size: 14px;
+    padding: 40px;
+  }
+  .rating-buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .rating-buttons button {
+    flex: 1;
+    padding: 8px;
+    font-size: 14px;
+    border: 2px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+  }
+  .rating-buttons button.selected[data-rating="good"] { border-color: var(--good); background: #e8f5e9; }
+  .rating-buttons button.selected[data-rating="maybe"] { border-color: var(--maybe); background: #fff8e1; }
+  .rating-buttons button.selected[data-rating="poor"] { border-color: var(--poor); background: #ffebee; }
+  /* "Check registration" is deliberately a checkbox, not a fourth rating
+     button: it is an independent flag that coexists with Good/Maybe/Poor. */
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    font-size: 14px;
+  }
+  .check-row input { margin: 0; }
+  .check-row label { cursor: pointer; }
+  textarea {
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 10px;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 6px;
+    resize: vertical;
+    min-height: 50px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================== setup ============================== -->
+<div id="setup-screen" class="card">
+  <h1>LC / SN QC Rating</h1>
+
+  <label class="field" for="rater">1. Your name</label>
+  <input type="text" id="rater" autocomplete="name">
+  <div class="hint">Your ratings are saved in this browser under this name, and your CSV files are named after it.</div>
+  <div class="status-line" id="rater-status"></div>
+
+  <label class="field" for="folder-input">2. Your MT_QC_scans folder</label>
+  <input type="file" id="folder-input" webkitdirectory multiple>
+  <div class="hint">
+    It must contain <code>MT_direct_transform_QC_images_LC</code> and <code>MT_direct_transform_QC_images_SN</code>.
+    Your browser may ask whether to "upload" the files. They are only read on your computer and are never sent anywhere.
+  </div>
+  <div class="status-line" id="folder-status"></div>
+
+  <label class="field" for="csv-input">3. Previous ratings (optional)</label>
+  <input type="file" id="csv-input" accept=".csv,text/csv" multiple>
+  <div class="hint">
+    To pick up where you left off on another computer or browser, choose the
+    <code>lc_qc_notes_….csv</code> and/or <code>sn_qc_notes_….csv</code> files you downloaded earlier.
+    Their ratings replace any saved in this browser for the same subjects.
+  </div>
+  <div class="status-line" id="csv-status"></div>
+
+  <button id="start-btn" disabled>Start rating</button>
+</div>
+
+<!-- ============================== rating ============================= -->
+<div id="rating-screen" class="hidden">
+  <header>
+    <h1>LC / SN QC Rating</h1>
+    <button id="prev-btn">&larr; Prev</button>
+    <select id="subject-select"></select>
+    <button id="next-btn">Next &rarr;</button>
+    <label class="filter">Show
+      <select id="filter-rating">
+        <option value="all">all</option>
+        <option value="yes">good</option>
+        <option value="maybe">maybe</option>
+        <option value="no">poor</option>
+        <option value="">unrated</option>
+      </select>
+      in
+      <select id="filter-modality">
+        <option value="either">LC or SN</option>
+        <option value="both">LC and SN</option>
+        <option value="LC">LC</option>
+        <option value="SN">SN</option>
+      </select>
+    </label>
+    <span id="progress"></span>
+    <span id="rater-info"></span>
+  </header>
+
+  <div id="save-bar">
+    <span id="unsaved"></span>
+    <button class="download-btn" data-modality="LC">Download LC CSV</button>
+    <button class="download-btn" data-modality="SN">Download SN CSV</button>
+    <span style="margin-left:auto"><a href="#" id="change-setup">Change setup</a></span>
+  </div>
+
+  <main>
+    <section class="panel" id="lc-panel">
+      <h2>LC <span class="badge" id="lc-badge">unrated</span><span class="badge check hidden" id="lc-check-badge">check registration</span></h2>
+      <div class="img-wrap" id="lc-img-wrap"></div>
+      <div class="rating-buttons">
+        <button data-modality="LC" data-rating="good">Good</button>
+        <button data-modality="LC" data-rating="maybe">Maybe</button>
+        <button data-modality="LC" data-rating="poor">Poor</button>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="lc-check" data-modality="LC">
+        <label for="lc-check">Check registration</label>
+      </div>
+      <textarea id="lc-comment" placeholder="Comment (optional)"></textarea>
+    </section>
+
+    <section class="panel" id="sn-panel">
+      <h2>SN <span class="badge" id="sn-badge">unrated</span><span class="badge check hidden" id="sn-check-badge">check registration</span></h2>
+      <div class="img-wrap" id="sn-img-wrap"></div>
+      <div class="rating-buttons">
+        <button data-modality="SN" data-rating="good">Good</button>
+        <button data-modality="SN" data-rating="maybe">Maybe</button>
+        <button data-modality="SN" data-rating="poor">Poor</button>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="sn-check" data-modality="SN">
+        <label for="sn-check">Check registration</label>
+      </div>
+      <textarea id="sn-comment" placeholder="Comment (optional)"></textarea>
+    </section>
+  </main>
+</div>
+
+<script>
+// Column names follow the repo's two clean CSVs, which use different
+// conventions for the same concepts ("Looks good" vs "SN_looks_good").
+const MODALITIES = {
+  LC: {prefix: "lc", subdir: "MT_direct_transform_QC_images_LC",
+       ratingCol: "Looks good", checkCol: "Check registration"},
+  SN: {prefix: "sn", subdir: "MT_direct_transform_QC_images_SN",
+       ratingCol: "SN_looks_good", checkCol: "SN_check_registration"},
+};
+// Stored values are "yes"/"maybe"/"no" (the downstream convention); the
+// buttons are just friendlier labels. "" = unrated.
+const RATING_VALUES = {good: "yes", maybe: "maybe", poor: "no", unrated: ""};
+const RATING_TO_KEY = {yes: "good", maybe: "maybe", no: "poor"};
+const STORAGE_PREFIX = "lcSnQcRatings:v1:";
+const LAST_RATER_KEY = "lcSnQcRatings:lastRater";
+
+const $ = id => document.getElementById(id);
+
+// ------------------------------------------------------------- state ---
+
+let rater = "";
+// {LC: {subjid: File}, SN: {...}} from the chosen folder
+let imageFiles = null;
+// {LC: {subjid: {rating, check, comment}}, SN: {...}}, persisted per rater
+let store = null;
+// CSV rows chosen on the setup screen, applied on Start
+let pendingCsv = {LC: null, SN: null};
+let subjects = [];
+let currentIndex = 0;
+// One object URL per image File, made on first view and kept: they point at
+// the local file rather than copying it, so holding them is cheap, and
+// revoking on every render broke images that hadn't finished loading.
+const objectUrls = new Map();
+
+function raterSlug(name) {
+  return name.trim().replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function csvFilename(modality) {
+  return `${MODALITIES[modality].prefix}_qc_notes_${raterSlug(rater)}.csv`;
+}
+
+function emptyStore() {
+  return {LC: {}, SN: {}, dirty: []};
+}
+
+function loadStore(name) {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORAGE_PREFIX + raterSlug(name)));
+    if (s && s.LC && s.SN) { s.dirty = s.dirty || []; return s; }
+  } catch (e) { /* fall through */ }
+  return emptyStore();
+}
+
+function persist() {
+  localStorage.setItem(STORAGE_PREFIX + raterSlug(rater), JSON.stringify(store));
+}
+
+function countRated(s) {
+  return Object.values(s.LC).filter(r => r.rating).length + Object.values(s.SN).filter(r => r.rating).length;
+}
+
+// --------------------------------------------------------------- CSV ---
+
+function parseCsv(text) {
+  // RFC 4180: quoted fields may hold commas, quotes ("") and newlines.
+  text = text.replace(/^﻿/, "");
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') inQuotes = false;
+      else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(field); rows.push(row); row = []; field = "";
+    } else field += c;
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(v => v !== ""));
+}
+
+function csvField(v) {
+  v = v == null ? "" : String(v);
+  return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+}
+
+// Same columns and row order as the Flask apps' CSVs. Subjects whose three
+// fields are all blank (e.g. rated and then un-rated) are left out.
+function buildCsv(modality) {
+  const cfg = MODALITIES[modality];
+  const lines = [["subjid", cfg.ratingCol, cfg.checkCol, "Comment"].map(csvField).join(",")];
+  for (const subjid of Object.keys(store[modality]).sort()) {
+    const r = store[modality][subjid];
+    if (!r.rating && !r.check && !r.comment) continue;
+    lines.push([subjid, r.rating || "", r.check ? "yes" : "", r.comment || ""].map(csvField).join(","));
+  }
+  return lines.join("\n") + "\n";
+}
+
+// Recognizes a ratings CSV by its header, so file names don't matter.
+function readRatingsCsv(text) {
+  const rows = parseCsv(text);
+  if (!rows.length) throw new Error("file is empty");
+  const header = rows[0].map(h => h.trim());
+  const modality = header.includes(MODALITIES.SN.ratingCol) ? "SN"
+                 : header.includes(MODALITIES.LC.ratingCol) ? "LC" : null;
+  if (!modality || !header.includes("subjid")) {
+    throw new Error(`no "subjid" plus "${MODALITIES.LC.ratingCol}" or "${MODALITIES.SN.ratingCol}" column`);
+  }
+  const cfg = MODALITIES[modality];
+  const col = name => header.indexOf(name);
+  const entries = {};
+  for (const r of rows.slice(1)) {
+    const subjid = (r[col("subjid")] || "").trim();
+    if (!subjid) continue;
+    entries[subjid] = {
+      rating: (r[col(cfg.ratingCol)] || "").trim(),
+      check: col(cfg.checkCol) >= 0 && (r[col(cfg.checkCol)] || "").trim() === "yes",
+      comment: col("Comment") >= 0 ? (r[col("Comment")] || "") : "",
+    };
+  }
+  return {modality, entries};
+}
+
+// ------------------------------------------------------------- setup ---
+
+function updateStartButton() {
+  $("start-btn").disabled = !(raterSlug($("rater").value) && imageFiles);
+}
+
+function showRaterStatus() {
+  const name = $("rater").value;
+  const el = $("rater-status");
+  if (!raterSlug(name)) { el.textContent = ""; return; }
+  const n = countRated(loadStore(name));
+  el.className = "status-line ok";
+  el.textContent = n ? `Found ${n} saved rating${n === 1 ? "" : "s"} for this name in this browser.` : "";
+}
+
+$("rater").addEventListener("input", () => { showRaterStatus(); updateStartButton(); });
+
+$("folder-input").addEventListener("change", (e) => loadFolderFiles(e.target.files));
+
+function loadFolderFiles(files) {
+  objectUrls.forEach(u => URL.revokeObjectURL(u));
+  objectUrls.clear();
+  const found = {LC: {}, SN: {}};
+  for (const f of files) {
+    if (!f.name.toLowerCase().endsWith(".png")) continue;
+    // Only PNGs sitting directly inside one of the two subfolders count.
+    const parts = f.webkitRelativePath.split("/");
+    const parent = parts[parts.length - 2];
+    for (const [modality, cfg] of Object.entries(MODALITIES)) {
+      if (parent !== cfg.subdir) continue;
+      const subjid = f.name.split("_")[0];
+      // Keep the alphabetically first file per subject, like the Flask apps.
+      const prev = found[modality][subjid];
+      if (subjid && (!prev || f.name < prev.name)) found[modality][subjid] = f;
+    }
+  }
+  const nLC = Object.keys(found.LC).length, nSN = Object.keys(found.SN).length;
+  const el = $("folder-status");
+  if (!nLC && !nSN) {
+    imageFiles = null;
+    el.className = "status-line error";
+    el.textContent = "No images found. Choose the MT_QC_scans folder itself (the one containing both image subfolders).";
+  } else {
+    imageFiles = found;
+    el.className = "status-line " + (nLC && nSN ? "ok" : "warning");
+    el.textContent = `Found ${nLC} LC and ${nSN} SN images.` +
+      (!nLC ? " (No LC images: is MT_direct_transform_QC_images_LC missing?)" : "") +
+      (!nSN ? " (No SN images: is MT_direct_transform_QC_images_SN missing?)" : "");
+  }
+  updateStartButton();
+}
+
+$("csv-input").addEventListener("change", async (e) => {
+  pendingCsv = {LC: null, SN: null};
+  const msgs = [], errors = [];
+  for (const f of e.target.files) {
+    try {
+      const {modality, entries} = readRatingsCsv(await f.text());
+      pendingCsv[modality] = entries;
+      msgs.push(`${f.name}: ${Object.keys(entries).length} ${modality} subjects`);
+    } catch (err) {
+      errors.push(`${f.name}: ${err.message}`);
+    }
+  }
+  const el = $("csv-status");
+  el.className = "status-line " + (errors.length ? "error" : "ok");
+  el.textContent = [...msgs, ...errors].join("; ");
+});
+
+$("start-btn").addEventListener("click", () => {
+  rater = $("rater").value.trim();
+  localStorage.setItem(LAST_RATER_KEY, rater);
+  store = loadStore(rater);
+  for (const modality of Object.keys(MODALITIES)) {
+    const entries = pendingCsv[modality];
+    if (!entries) continue;
+    for (const [subjid, r] of Object.entries(entries)) {
+      store[modality][subjid] = r;
+    }
+  }
+  pendingCsv = {LC: null, SN: null};
+  $("csv-input").value = "";
+  $("csv-status").textContent = "";
+  persist();
+  buildSubjects();
+  $("setup-screen").classList.add("hidden");
+  $("rating-screen").classList.remove("hidden");
+  $("rater-info").textContent = `Rater: ${rater}`;
+  renderSelectOptions();
+  render();
+  renderSaveBar();
+});
+
+$("change-setup").addEventListener("click", (e) => {
+  e.preventDefault();
+  commitComments();
+  $("rating-screen").classList.add("hidden");
+  $("setup-screen").classList.remove("hidden");
+  showRaterStatus();
+});
+
+// Subjects = everyone with an image or a saved rating in either modality,
+// as in the Flask apps' /api/subjects.
+function buildSubjects() {
+  const ids = new Set();
+  for (const m of Object.keys(MODALITIES)) {
+    Object.keys(imageFiles[m]).forEach(id => ids.add(id));
+    Object.keys(store[m]).forEach(id => ids.add(id));
+  }
+  subjects = [...ids].sort().map(subjid => ({subjid}));
+  currentIndex = 0;
+}
+
+function entry(modality, subjid) {
+  return store[modality][subjid] || {rating: "", check: false, comment: ""};
+}
+
+// ------------------------------------------------------------ filter ---
+
+// Filter: which rating ("all", "yes", "maybe", "no", or "" for unrated) in
+// which modality ("LC", "SN", "either", "both"). Matching is re-checked live,
+// so a subject whose rating changes stays on screen until you navigate away,
+// and then drops out of (or into) the filtered set.
+function matchesFilter(subj) {
+  const rating = $("filter-rating").value;
+  const modality = $("filter-modality").value;
+  if (rating === "all") return true;
+  const lc = entry("LC", subj.subjid).rating === rating;
+  const sn = entry("SN", subj.subjid).rating === rating;
+  if (modality === "LC") return lc;
+  if (modality === "SN") return sn;
+  if (modality === "both") return lc && sn;
+  return lc || sn;
+}
+
+function matchingIndices() {
+  return subjects.map((s, i) => i).filter(i => matchesFilter(subjects[i]));
+}
+
+// ------------------------------------------------------------ render ---
+
+function badgeLabel(rating) {
+  if (rating === "yes") return "good";
+  if (rating === "maybe") return "maybe";
+  if (rating === "no") return "poor";
+  return rating ? rating : "unrated";
+}
+
+function statusLabel(r) {
+  return badgeLabel(r.rating) + (r.check ? " +check reg" : "");
+}
+
+function optionLabel(subj) {
+  return `${subj.subjid} — LC: ${statusLabel(entry("LC", subj.subjid))}, SN: ${statusLabel(entry("SN", subj.subjid))}`;
+}
+
+function renderSelectOptions() {
+  const select = $("subject-select");
+  const shown = matchingIndices();
+  if (subjects[currentIndex] && !shown.includes(currentIndex)) {
+    shown.push(currentIndex);
+    shown.sort((a, b) => a - b);
+  }
+  select.replaceChildren(...shown.map(i => new Option(optionLabel(subjects[i]), i)));
+  select.value = currentIndex;
+}
+
+function renderPanel(modality, subj) {
+  const prefix = modality.toLowerCase();
+  const file = imageFiles[modality][subj.subjid];
+  const r = entry(modality, subj.subjid);
+
+  const imgWrap = $(`${prefix}-img-wrap`);
+  imgWrap.replaceChildren();
+  if (file) {
+    const img = document.createElement("img");
+    if (!objectUrls.has(file)) objectUrls.set(file, URL.createObjectURL(file));
+    img.src = objectUrls.get(file);
+    img.alt = `${modality} overlay for ${subj.subjid}`;
+    imgWrap.appendChild(img);
+  } else {
+    const div = document.createElement("div");
+    div.className = "img-missing";
+    div.textContent = `No ${modality} image found for ${subj.subjid}`;
+    imgWrap.appendChild(div);
+  }
+
+  const badge = $(`${prefix}-badge`);
+  badge.textContent = badgeLabel(r.rating);
+  badge.className = "badge " + (r.rating || "");
+
+  $(`${prefix}-check-badge`).classList.toggle("hidden", !r.check);
+
+  document.querySelectorAll(`#${prefix}-panel .rating-buttons button`).forEach(btn => {
+    btn.classList.toggle("selected", RATING_TO_KEY[r.rating] === btn.dataset.rating);
+  });
+
+  $(`${prefix}-check`).checked = !!r.check;
+  $(`${prefix}-comment`).value = r.comment || "";
+}
+
+function render() {
+  const subj = subjects[currentIndex];
+  if (!subj) {
+    $("progress").textContent = "no subjects";
+    return;
+  }
+  $("subject-select").value = currentIndex;
+  const matches = matchingIndices();
+  const pos = matches.indexOf(currentIndex);
+  const filtered = $("filter-rating").value !== "all";
+  let progress;
+  if (!filtered) progress = `${currentIndex + 1} of ${subjects.length}`;
+  else if (!matches.length) progress = "no subjects match";
+  else if (pos === -1) progress = `(not in filter) · ${matches.length} match`;
+  else progress = `${pos + 1} of ${matches.length} matching`;
+  $("progress").textContent = progress;
+  renderPanel("LC", subj);
+  renderPanel("SN", subj);
+}
+
+// -------------------------------------------------------------- save ---
+
+// Updates only the fields given, so setting one of rating/check/comment
+// never clears the other two.
+function save(modality, fields, rerender) {
+  const subj = subjects[currentIndex];
+  if (!subj) return;
+  const r = Object.assign({}, entry(modality, subj.subjid), fields);
+  const before = JSON.stringify(entry(modality, subj.subjid));
+  if (JSON.stringify(r) === before) return;
+  store[modality][subj.subjid] = r;
+  const key = `${modality}|${subj.subjid}`;
+  if (!store.dirty.includes(key)) store.dirty.push(key);
+  persist();
+  // Comment saves skip the re-render: rebuilding the panel mid-edit would
+  // clobber whatever is in the other textarea.
+  if (rerender) {
+    renderSelectOptions();
+    render();
+  }
+  renderSaveBar();
+}
+
+// A comment is saved to the browser as it's typed, but a textarea that still
+// has focus when navigating needs flushing first.
+function commitComments() {
+  for (const modality of Object.keys(MODALITIES)) {
+    const ta = $(`${modality.toLowerCase()}-comment`);
+    if (subjects[currentIndex]) save(modality, {comment: ta.value}, false);
+  }
+}
+
+document.querySelectorAll(".rating-buttons button").forEach(btn => {
+  btn.title = "Click again to unrate";
+  // Clicking the already-selected rating clears it back to unrated.
+  btn.addEventListener("click", () => {
+    const key = btn.classList.contains("selected") ? "unrated" : btn.dataset.rating;
+    save(btn.dataset.modality, {rating: RATING_VALUES[key]}, true);
+  });
+});
+
+document.querySelectorAll(".check-row input").forEach(box => {
+  box.addEventListener("change", () => save(box.dataset.modality, {check: box.checked}, true));
+});
+
+Object.keys(MODALITIES).forEach(modality => {
+  $(`${modality.toLowerCase()}-comment`).addEventListener("input", (e) => {
+    save(modality, {comment: e.target.value}, false);
+  });
+});
+
+// ---------------------------------------------------------- download ---
+
+// Dirty keys are "<modality>|<subjid>", so each CSV's pending count is
+// separate and downloading one file only clears its own.
+function dirtyCount(modality) {
+  return store.dirty.filter(k => k.startsWith(modality + "|")).length;
+}
+
+function renderSaveBar() {
+  const el = $("unsaved");
+  const pending = Object.keys(MODALITIES)
+    .map(m => [m, dirtyCount(m)])
+    .filter(([, n]) => n)
+    .map(([m, n]) => `${m}: ${n}`);
+  el.className = pending.length ? "pending" : "";
+  el.textContent = pending.length
+    ? `Changes not yet downloaded (kept in this browser) — ${pending.join(", ")}`
+    : "All changes downloaded.";
+}
+
+function downloadFile(name, text) {
+  const url = URL.createObjectURL(new Blob([text], {type: "text/csv"}));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// One file per click, on purpose: Chrome treats a second download from the
+// same click as "downloading multiple files automatically" and asks for
+// permission, and if that's blocked (or ignored), it blocks every later
+// download from the page too.
+document.querySelectorAll(".download-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const modality = btn.dataset.modality;
+    commitComments();
+    downloadFile(csvFilename(modality), buildCsv(modality));
+    store.dirty = store.dirty.filter(k => !k.startsWith(modality + "|"));
+    persist();
+    renderSaveBar();
+  });
+});
+
+// ---------------------------------------------------------- navigate ---
+
+function step(direction) {
+  commitComments();
+  const matches = matchingIndices();
+  const target = direction > 0
+    ? matches.find(i => i > currentIndex)
+    : matches.filter(i => i < currentIndex).pop();
+  if (target === undefined) return;
+  currentIndex = target;
+  renderSelectOptions();
+  render();
+}
+
+$("prev-btn").addEventListener("click", () => step(-1));
+$("next-btn").addEventListener("click", () => step(1));
+
+["filter-rating", "filter-modality"].forEach(id => {
+  $(id).addEventListener("change", () => {
+    const matches = matchingIndices();
+    if (matches.length && !matches.includes(currentIndex)) {
+      // jump to the next match after the current subject, wrapping around
+      currentIndex = matches.find(i => i > currentIndex) ?? matches[0];
+    }
+    renderSelectOptions();
+    render();
+  });
+});
+$("subject-select").addEventListener("change", (e) => {
+  commitComments();
+  currentIndex = parseInt(e.target.value, 10);
+  renderSelectOptions();
+  render();
+});
+
+document.addEventListener("keydown", (e) => {
+  if ($("rating-screen").classList.contains("hidden")) return;
+  const tag = document.activeElement.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT" || tag === "INPUT") return;
+  if (e.key === "ArrowLeft") step(-1);
+  if (e.key === "ArrowRight") step(1);
+});
+
+// ------------------------------------------------------------- start ---
+
+$("rater").value = localStorage.getItem(LAST_RATER_KEY) || "";
+showRaterStatus();
+updateStartButton();
+</script>
+
+</body>
+</html>
