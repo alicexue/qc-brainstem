@@ -13,10 +13,10 @@
     and the subjid is the first "_"-delimited token of each filename, exactly
     as in the Flask apps.
   - Ratings: kept in localStorage under the rater's name, so a refresh or a
-    closed tab loses nothing. They leave the browser as the same two CSVs the
-    Flask apps write (identical columns, so they merge into the repo's
-    *_qc_notes_clean_subjid.csv files), via the two download buttons.
-  - Resuming elsewhere: "Load previous ratings" reads those CSVs back in.
+    closed tab loses nothing. They leave the browser as one CSV,
+    qc_notes_<rater>.csv, with LC and SN columns side by side -- the same
+    file ../qc_standalone_webapp writes.
+  - Resuming elsewhere: "Previous ratings" reads that CSV back in.
 -->
 <style>
   :root {
@@ -220,10 +220,10 @@
   <div class="status-line" id="folder-status"></div>
 
   <label class="field" for="csv-input">3. Previous ratings (optional)</label>
-  <input type="file" id="csv-input" accept=".csv,text/csv" multiple>
+  <input type="file" id="csv-input" accept=".csv,text/csv">
   <div class="hint">
     To pick up where you left off on another computer or browser, choose the
-    <code>lc_qc_notes_….csv</code> and/or <code>sn_qc_notes_….csv</code> files you downloaded earlier.
+    the <code>qc_notes_….csv</code> file you downloaded earlier.
     Their ratings replace any saved in this browser for the same subjects.
   </div>
   <div class="status-line" id="csv-status"></div>
@@ -260,8 +260,7 @@
 
   <div id="save-bar">
     <span id="unsaved"></span>
-    <button class="download-btn" data-modality="LC">Download LC CSV</button>
-    <button class="download-btn" data-modality="SN">Download SN CSV</button>
+    <button id="download-btn">Download CSV</button>
     <span style="margin-left:auto"><a href="#" id="change-setup">Change setup</a></span>
   </div>
 
@@ -299,14 +298,15 @@
 </div>
 
 <script>
-// Column names follow the repo's two clean CSVs, which use different
-// conventions for the same concepts ("Looks good" vs "SN_looks_good").
+// One CSV holds both modalities, each under its own prefixed columns.
 const MODALITIES = {
-  LC: {prefix: "lc", subdir: "MT_direct_transform_QC_images_LC",
-       ratingCol: "Looks good", checkCol: "Check registration"},
-  SN: {prefix: "sn", subdir: "MT_direct_transform_QC_images_SN",
-       ratingCol: "SN_looks_good", checkCol: "SN_check_registration"},
+  LC: {prefix: "lc", subdir: "MT_direct_transform_QC_images_LC"},
+  SN: {prefix: "sn", subdir: "MT_direct_transform_QC_images_SN"},
 };
+for (const [m, cfg] of Object.entries(MODALITIES)) {
+  Object.assign(cfg, {ratingCol: `${m}_looks_good`, checkCol: `${m}_check_registration`,
+                      commentCol: `${m}_comment`});
+}
 // Stored values are "yes"/"maybe"/"no" (the downstream convention); the
 // buttons are just friendlier labels. "" = unrated.
 const RATING_VALUES = {good: "yes", maybe: "maybe", poor: "no", unrated: ""};
@@ -323,8 +323,8 @@ let rater = "";
 let imageFiles = null;
 // {LC: {subjid: {rating, check, comment}}, SN: {...}}, persisted per rater
 let store = null;
-// CSV rows chosen on the setup screen, applied on Start
-let pendingCsv = {LC: null, SN: null};
+// Ratings read from a CSV on the setup screen ({LC: {...}, SN: {...}}), applied on Start
+let pendingCsv = null;
 let subjects = [];
 let currentIndex = 0;
 // One object URL per image File, made on first view and kept: they point at
@@ -336,8 +336,8 @@ function raterSlug(name) {
   return name.trim().replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
-function csvFilename(modality) {
-  return `${MODALITIES[modality].prefix}_qc_notes_${raterSlug(rater)}.csv`;
+function csvFilename() {
+  return `qc_notes_${raterSlug(rater)}.csv`;
 }
 
 function emptyStore() {
@@ -389,42 +389,53 @@ function csvField(v) {
   return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
 }
 
-// Same columns and row order as the Flask apps' CSVs. Subjects whose three
-// fields are all blank (e.g. rated and then un-rated) are left out.
-function buildCsv(modality) {
-  const cfg = MODALITIES[modality];
-  const lines = [["subjid", cfg.ratingCol, cfg.checkCol, "Comment"].map(csvField).join(",")];
-  for (const subjid of Object.keys(store[modality]).sort()) {
-    const r = store[modality][subjid];
-    if (!r.rating && !r.check && !r.comment) continue;
-    lines.push([subjid, r.rating || "", r.check ? "yes" : "", r.comment || ""].map(csvField).join(","));
+// Same columns and row order as qc_standalone_webapp's CSV: one row per
+// subject, LC then SN. Subjects with every field blank in both modalities
+// (e.g. rated and then un-rated) are left out.
+function buildCsv() {
+  const ms = Object.values(MODALITIES);
+  const header = ["subjid", ...ms.flatMap(c => [c.ratingCol, c.checkCol, c.commentCol])];
+  const lines = [header.map(csvField).join(",")];
+  const ids = [...new Set(Object.keys(MODALITIES).flatMap(m => Object.keys(store[m])))].sort();
+  for (const subjid of ids) {
+    const fields = Object.keys(MODALITIES).flatMap(m => {
+      const r = entry(m, subjid);
+      return [r.rating || "", r.check ? "yes" : "", r.comment || ""];
+    });
+    if (fields.every(v => v === "")) continue;
+    lines.push([subjid, ...fields].map(csvField).join(","));
   }
   return lines.join("\n") + "\n";
 }
 
-// Recognizes a ratings CSV by its header, so file names don't matter.
+// Reads a ratings CSV back into {LC: {subjid: entry}, SN: {...}}. A modality
+// whose rating column is absent is left out rather than blanked, so a file
+// with only one modality's columns can't wipe the other's saved ratings.
 function readRatingsCsv(text) {
   const rows = parseCsv(text);
   if (!rows.length) throw new Error("file is empty");
   const header = rows[0].map(h => h.trim());
-  const modality = header.includes(MODALITIES.SN.ratingCol) ? "SN"
-                 : header.includes(MODALITIES.LC.ratingCol) ? "LC" : null;
-  if (!modality || !header.includes("subjid")) {
-    throw new Error(`no "subjid" plus "${MODALITIES.LC.ratingCol}" or "${MODALITIES.SN.ratingCol}" column`);
-  }
-  const cfg = MODALITIES[modality];
   const col = name => header.indexOf(name);
-  const entries = {};
-  for (const r of rows.slice(1)) {
-    const subjid = (r[col("subjid")] || "").trim();
-    if (!subjid) continue;
-    entries[subjid] = {
-      rating: (r[col(cfg.ratingCol)] || "").trim(),
-      check: col(cfg.checkCol) >= 0 && (r[col(cfg.checkCol)] || "").trim() === "yes",
-      comment: col("Comment") >= 0 ? (r[col("Comment")] || "") : "",
-    };
+  if (col("subjid") < 0) throw new Error('no "subjid" column');
+  const result = {};
+  for (const [m, cfg] of Object.entries(MODALITIES)) {
+    if (col(cfg.ratingCol) < 0) continue;
+    const get = (r, name) => col(name) >= 0 ? (r[col(name)] || "") : "";
+    result[m] = {};
+    for (const r of rows.slice(1)) {
+      const subjid = get(r, "subjid").trim();
+      if (!subjid) continue;
+      result[m][subjid] = {
+        rating: get(r, cfg.ratingCol).trim(),
+        check: get(r, cfg.checkCol).trim() === "yes",
+        comment: get(r, cfg.commentCol),
+      };
+    }
   }
-  return {modality, entries};
+  if (!Object.keys(result).length) {
+    throw new Error(`no ${Object.values(MODALITIES).map(c => `"${c.ratingCol}"`).join(" or ")} column`);
+  }
+  return result;
 }
 
 // ------------------------------------------------------------- setup ---
@@ -480,34 +491,29 @@ function loadFolderFiles(files) {
 }
 
 $("csv-input").addEventListener("change", async (e) => {
-  pendingCsv = {LC: null, SN: null};
-  const msgs = [], errors = [];
-  for (const f of e.target.files) {
-    try {
-      const {modality, entries} = readRatingsCsv(await f.text());
-      pendingCsv[modality] = entries;
-      msgs.push(`${f.name}: ${Object.keys(entries).length} ${modality} subjects`);
-    } catch (err) {
-      errors.push(`${f.name}: ${err.message}`);
-    }
-  }
+  pendingCsv = null;
+  const f = e.target.files[0];
   const el = $("csv-status");
-  el.className = "status-line " + (errors.length ? "error" : "ok");
-  el.textContent = [...msgs, ...errors].join("; ");
+  if (!f) { el.textContent = ""; return; }
+  try {
+    pendingCsv = readRatingsCsv(await f.text());
+    el.className = "status-line ok";
+    el.textContent = `${f.name}: ` + Object.entries(pendingCsv)
+      .map(([m, entries]) => `${Object.keys(entries).length} ${m} subjects`).join(", ");
+  } catch (err) {
+    el.className = "status-line error";
+    el.textContent = `${f.name}: ${err.message}`;
+  }
 });
 
 $("start-btn").addEventListener("click", () => {
   rater = $("rater").value.trim();
   localStorage.setItem(LAST_RATER_KEY, rater);
   store = loadStore(rater);
-  for (const modality of Object.keys(MODALITIES)) {
-    const entries = pendingCsv[modality];
-    if (!entries) continue;
-    for (const [subjid, r] of Object.entries(entries)) {
-      store[modality][subjid] = r;
-    }
+  for (const [modality, entries] of Object.entries(pendingCsv || {})) {
+    Object.assign(store[modality], entries);
   }
-  pendingCsv = {LC: null, SN: null};
+  pendingCsv = null;
   $("csv-input").value = "";
   $("csv-status").textContent = "";
   persist();
@@ -701,21 +707,12 @@ Object.keys(MODALITIES).forEach(modality => {
 
 // ---------------------------------------------------------- download ---
 
-// Dirty keys are "<modality>|<subjid>", so each CSV's pending count is
-// separate and downloading one file only clears its own.
-function dirtyCount(modality) {
-  return store.dirty.filter(k => k.startsWith(modality + "|")).length;
-}
-
 function renderSaveBar() {
+  const n = store.dirty.length;
   const el = $("unsaved");
-  const pending = Object.keys(MODALITIES)
-    .map(m => [m, dirtyCount(m)])
-    .filter(([, n]) => n)
-    .map(([m, n]) => `${m}: ${n}`);
-  el.className = pending.length ? "pending" : "";
-  el.textContent = pending.length
-    ? `Changes not yet downloaded (kept in this browser) — ${pending.join(", ")}`
+  el.className = n ? "pending" : "";
+  el.textContent = n
+    ? `${n} change${n === 1 ? "" : "s"} not yet downloaded (kept in this browser)`
     : "All changes downloaded.";
 }
 
@@ -730,19 +727,15 @@ function downloadFile(name, text) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// One file per click, on purpose: Chrome treats a second download from the
-// same click as "downloading multiple files automatically" and asks for
-// permission, and if that's blocked (or ignored), it blocks every later
-// download from the page too.
-document.querySelectorAll(".download-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    const modality = btn.dataset.modality;
-    commitComments();
-    downloadFile(csvFilename(modality), buildCsv(modality));
-    store.dirty = store.dirty.filter(k => !k.startsWith(modality + "|"));
-    persist();
-    renderSaveBar();
-  });
+// Deliberately a single file: Chrome treats a second download from the same
+// click as "downloading multiple files automatically", and once that prompt
+// is blocked (or ignored) it blocks every later download from the page too.
+$("download-btn").addEventListener("click", () => {
+  commitComments();
+  downloadFile(csvFilename(), buildCsv());
+  store.dirty = [];
+  persist();
+  renderSaveBar();
 });
 
 // ---------------------------------------------------------- navigate ---
